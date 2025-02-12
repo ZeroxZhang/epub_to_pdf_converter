@@ -58,6 +58,12 @@ With the popularity of e-books, EPUB format has become one of the mainstream e-b
 
 ## Changelog
 
+### 2025-02-12 (Version 2)
+- Fix: Fixed line break text loss issue in exported documents
+- Optimization: Enhanced document layout logic for better formatting
+- Performance: Improved conversion efficiency through font pre-registration
+- Performance: Implemented chunk processing for large files to reduce memory usage
+
 ### 2025-02-12
 - Fix: Resolved the issue of incomplete display of some Chinese characters
 - Optimization: Improved PDF document layout format for better reading experience
@@ -127,6 +133,12 @@ With the popularity of e-books, EPUB format has become one of the mainstream e-b
 - tkinter: 图形界面支持（Python标准库）
 
 ## 更新日志
+
+### 2025-02-12 (版本2)
+- 修复：优化了导出文档换行文字缺失问题
+- 优化：优化了导出文档的排版逻辑
+- 性能：通过前置字体注册，提高转换效率
+- 性能：大文件处理使用了分块逻辑，减少内存占用
 
 ### 2025-02-12
 - 修复：解决了部分中文字符显示不完整的问题

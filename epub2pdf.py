@@ -13,9 +13,29 @@ from reportlab.pdfbase.ttfonts import TTFont
 from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import filedialog
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+# 全局变量用于缓存字体注册状态
+_font_registered = False
+_registered_font_path = None
 
 # 注册中文字体
 def register_chinese_font():
+    global _font_registered, _registered_font_path
+    
+    # 如果字体已注册，直接返回
+    if _font_registered and _registered_font_path:
+        try:
+            # 验证字体是否可用
+            pdfmetrics.getFont('chinese')
+            return True
+        except Exception:
+            # 如果字体不可用，重置状态并继续注册
+            _font_registered = False
+            _registered_font_path = None
+    
     try:
         # 尝试使用系统自带的中文字体
         font_paths = []
@@ -60,19 +80,27 @@ def register_chinese_font():
                 '/usr/share/fonts/truetype/takao/TakaoPGothic.ttf'
             ]
             
-        registered = False
         for font_path in font_paths:
             if os.path.exists(font_path):
                 try:
-                    pdfmetrics.registerFont(TTFont('chinese', font_path))
-                    print(f"成功注册中文字体: {font_path}")
-                    registered = True
-                    break
+                    # 先检查字体是否已注册
+                    try:
+                        pdfmetrics.getFont('chinese')
+                        _font_registered = True
+                        _registered_font_path = font_path
+                        return True
+                    except Exception:
+                        # 字体未注册，进行注册
+                        pdfmetrics.registerFont(TTFont('chinese', font_path))
+                        print(f"成功注册中文字体: {font_path}")
+                        _font_registered = True
+                        _registered_font_path = font_path
+                        return True
                 except Exception as font_error:
                     print(f"注册字体 {font_path} 失败: {str(font_error)}")
                     continue
         
-        if not registered:
+        if not _font_registered:
             # 尝试使用系统默认字体
             try:
                 from matplotlib.font_manager import findSystemFonts
@@ -82,14 +110,15 @@ def register_chinese_font():
                         try:
                             pdfmetrics.registerFont(TTFont('chinese', font))
                             print(f"成功注册系统字体: {font}")
-                            registered = True
-                            break
+                            _font_registered = True
+                            _registered_font_path = font
+                            return True
                         except:
                             continue
             except ImportError:
                 pass
         
-        if not registered:
+        if not _font_registered:
             print("警告：未找到合适的中文字体，文档可能无法正确显示中文")
             return False
         
@@ -98,10 +127,162 @@ def register_chinese_font():
         print(f"注册中文字体失败: {str(e)}")
         return False
 
+def process_chunk(chunk, font_info, pdf_canvas, width, height, margins):
+    """处理文本块"""
+    margin_left, margin_right, margin_top, margin_bottom = margins
+    text_width = width - margin_left - margin_right
+    y = height - margin_top
+    
+    has_chinese_font, font_name = font_info
+    try:
+        if has_chinese_font:
+            pdf_canvas.setFont(font_name, 12)
+        else:
+            # 如果没有中文字体，使用默认字体
+            pdf_canvas.setFont('Helvetica', 12)
+    except Exception as e:
+        print(f"设置字体失败: {str(e)}，使用默认字体")
+        pdf_canvas.setFont('Helvetica', 12)
+    
+    soup = BeautifulSoup(chunk, 'html.parser')
+    for script in soup(['script', 'style']):
+        script.decompose()
+    
+    # 提取并处理文本内容，保持章节结构
+    text_blocks = []
+    for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div']):
+        tag_name = element.name
+        text = element.get_text(strip=True)
+        if text:
+            text_blocks.append((tag_name, text))
+    
+    # 渲染文本内容
+    base_line_height = 15  # 基础行高
+    paragraph_spacing = 20  # 段落间距
+    heading_spacing = 30   # 标题间距
+    indent_size = 24       # 段落缩进
+    
+    for tag_name, text in text_blocks:
+        try:
+            # 根据标签类型设置不同的样式
+            if tag_name.startswith('h'):
+                heading_level = int(tag_name[1])
+                font_size = max(12, 24 - (heading_level * 2))  # h1=24, h2=22, h3=20...
+                pdf_canvas.setFont(font_name if has_chinese_font else 'Helvetica-Bold', font_size)
+                y -= heading_spacing
+            else:
+                pdf_canvas.setFont(font_name if has_chinese_font else 'Helvetica', 12)
+            
+            # 处理长文本自动换行，针对中英文混合文本
+            current_line = []
+            current_width = indent_size if tag_name == 'p' else 0  # 段落首行缩进
+            
+            # 将文本按照中英文和标点符号分割
+            text_parts = []
+            temp = ''
+            for char in text:
+                # 判断字符类型（中文、英文、标点符号）
+                is_cjk = ord(char) > 127
+                is_punctuation = not char.isalnum() and not char.isspace()
+                
+                # 处理分割逻辑
+                if is_cjk:
+                    if temp:
+                        text_parts.append(temp)
+                        temp = ''
+                    text_parts.append(char)
+                elif is_punctuation:
+                    if temp:
+                        text_parts.append(temp)
+                        temp = ''
+                    text_parts.append(char)
+                else:  # 英文和数字
+                    if not temp or char.isspace() or (temp[-1].isspace()):
+                        temp += char
+                    elif (temp[-1].isalnum() and char.isalnum()):
+                        temp += char
+                    else:
+                        text_parts.append(temp)
+                        temp = char
+            if temp:
+                text_parts.append(temp)
+            
+            # 优化行宽计算和换行处理
+            first_line = True
+            for part in text_parts:
+                try:
+                    # 计算当前部分的宽度
+                    part_width = pdf_canvas.stringWidth(part, pdf_canvas._fontname, pdf_canvas._fontsize)
+                    
+                    # 计算是否需要添加空格
+                    need_space = False
+                    if current_line and not part.isspace():
+                        last_part = current_line[-1]
+                        if (ord(last_part[-1]) <= 127 and ord(part[0]) <= 127) and \
+                           (last_part[-1].isalnum() or part[0].isalnum()):
+                            need_space = True
+                    
+                    space_width = pdf_canvas.stringWidth(' ', pdf_canvas._fontname, pdf_canvas._fontsize) if need_space else 0
+                    total_width = current_width + part_width + space_width
+                    
+                    # 判断是否需要换行
+                    if total_width <= text_width:
+                        if need_space:
+                            current_line.append(' ')
+                        current_line.append(part)
+                        current_width = total_width
+                    else:
+                        # 绘制当前行
+                        if current_line:
+                            line_text = ''.join(current_line)
+                            x_pos = margin_left + (indent_size if first_line and tag_name == 'p' else 0)
+                            pdf_canvas.drawString(x_pos, y, line_text)
+                            y -= base_line_height * (1.5 if tag_name.startswith('h') else 1.2)
+                            first_line = False
+                        # 开始新行
+                        current_line = [part]
+                        current_width = part_width
+                except Exception as e:
+                    print(f"处理单词宽度时出错: {str(e)}")
+                    continue
+            
+            # 绘制最后一行
+            if current_line:
+                try:
+                    line_text = ''.join(current_line)
+                    x_pos = margin_left + (indent_size if first_line and tag_name == 'p' else 0)
+                    pdf_canvas.drawString(x_pos, y, line_text)
+                    # 根据标签类型添加不同的间距
+                    if tag_name.startswith('h'):
+                        y -= heading_spacing
+                    else:
+                        y -= paragraph_spacing
+                except Exception as e:
+                    print(f"绘制文本行时出错: {str(e)}")
+            
+            # 检查是否需要新页面
+            if y < margin_bottom:
+                pdf_canvas.showPage()
+                y = height - margin_top
+                try:
+                    if tag_name.startswith('h'):
+                        pdf_canvas.setFont(font_name if has_chinese_font else 'Helvetica-Bold', font_size)
+                    else:
+                        pdf_canvas.setFont(font_name if has_chinese_font else 'Helvetica', 12)
+                except Exception as e:
+                    print(f"设置新页面字体失败: {str(e)}，使用默认字体")
+                    pdf_canvas.setFont('Helvetica', 12)
+        except Exception as e:
+            print(f"处理文本块时出错: {str(e)}")
+            continue
+    
+    return y
+
 def convert_epub_to_pdf(epub_path, output_dir=None):
     try:
-        # 确保中文字体已注册
-        has_chinese_font = register_chinese_font()
+        # 确保在子进程中重新注册字体
+        if not _font_registered:
+            register_chinese_font()
         
         # 读取epub文件
         book = epub.read_epub(epub_path)
@@ -119,22 +300,18 @@ def convert_epub_to_pdf(epub_path, output_dir=None):
         # 创建PDF文档
         c = canvas.Canvas(str(pdf_path), pagesize=A4)
         width, height = A4
-        margin_left = 50
-        margin_right = 50
-        margin_top = 50
-        margin_bottom = 50
-        text_width = width - margin_left - margin_right
+        margins = (50, 50, 50, 50)  # left, right, top, bottom
         
-        # 设置基本字体和样式
-        if has_chinese_font:
-            c.setFont('chinese', 12)  # 正文字体
+        # 获取字体信息并确保字体已注册
+        font_info = (_font_registered, 'chinese' if _font_registered else 'Helvetica')
         
-        # 提取epub内容并转换为文本
+        # 提取epub内容并分块处理
+        chunk_size = 1024 * 1024  # 1MB per chunk
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
             try:
-                # 尝试多种编码方式
                 content = item.get_content()
-                encodings = ['utf-8', 'utf-16', 'gbk', 'gb2312', 'big5', 'shift-jis', 'euc-jp', 'euc-kr', 'iso-2022-jp', 'euc-kr']
+                # 尝试多种编码
+                encodings = ['utf-8', 'utf-16', 'gbk', 'gb2312', 'big5', 'shift-jis', 'euc-jp', 'euc-kr']
                 html_content = None
                 
                 for encoding in encodings:
@@ -147,124 +324,17 @@ def convert_epub_to_pdf(epub_path, output_dir=None):
                 if html_content is None:
                     html_content = content.decode('utf-8', errors='replace')
                 
-                soup = BeautifulSoup(html_content, 'html.parser')
-                # 移除script和style标签
-                for script in soup(["script", "style"]):
-                    script.decompose()
+                # 分块处理内容
+                chunks = [html_content[i:i+chunk_size] 
+                         for i in range(0, len(html_content), chunk_size)]
                 
-                # 处理标题和段落
-                y = height - margin_top
-                for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'span']):
-                    # 获取文本内容和样式
-                    text = element.get_text(strip=True)
-                    if not text:
-                        continue
-                    
-                    # 解析样式
-                    style = element.get('style', '')
-                    text_align = 'left'  # 默认左对齐
-                    if 'text-align: center' in style:
-                        text_align = 'center'
-                    elif 'text-align: right' in style:
-                        text_align = 'right'
-                    
-                    # 根据标签类型设置样式
-                    if element.name.startswith('h'):
-                        level = int(element.name[1])
-                        font_size = 24 - (level * 2)  # h1=22, h2=20, h3=18, ...
-                        if has_chinese_font:
-                            c.setFont('chinese', font_size)
-                        y -= font_size + 10  # 标题前增加额外空间
-                        
-                        # 处理标题对齐
-                        if text_align == 'center':
-                            c.drawCentredString(width/2, y, text)
-                        elif text_align == 'right':
-                            c.drawRightString(width - margin_right, y, text)
-                        else:
-                            c.drawString(margin_left, y, text)
-                            
-                        y -= font_size  # 标题后增加额外空间
-                    else:  # 段落文本
-                        if has_chinese_font:
-                            c.setFont('chinese', 12)
-                        
-                        # 处理段落缩进
-                        indent = 24  # 默认缩进两个中文字符
-                        current_x = margin_left + indent
-                        
-                        # 分段处理长文本
-                        words = []
-                        # 对中文和非中文字符分别处理
-                        current_word = ''
-                        for char in text:
-                            if ord(char) > 127:  # 中文字符
-                                if current_word:
-                                    words.append(current_word)
-                                    current_word = ''
-                                words.append(char)
-                            else:  # 非中文字符
-                                current_word += char
-                        if current_word:
-                            words.append(current_word)
-                            
-                        line = ''
-                        first_line = True
-                        
-                        for word in words:
-                            test_line = line + word
-                            if line and not word.isspace():  # 如果不是第一个词且不是空格，添加空格
-                                test_line = line + ' ' + word
-                            
-                            line_width = c.stringWidth(test_line, 'chinese' if has_chinese_font else None, 12)
-                            
-                            if line_width < text_width - (indent if first_line else 0):
-                                line = test_line
-                            else:
-                                if y < margin_bottom + 20:  # 页面空间不足，创建新页面
-                                    c.showPage()
-                                    if has_chinese_font:
-                                        c.setFont('chinese', 12)
-                                    y = height - margin_top
-                                
-                                # 绘制当前行
-                                x = current_x if first_line else margin_left
-                                if text_align == 'center':
-                                    c.drawCentredString(width/2, y, line)
-                                elif text_align == 'right':
-                                    c.drawRightString(width - margin_right, y, line)
-                                else:
-                                    c.drawString(x, y, line)
-                                
-                                y -= 20
-                                line = word
-                                first_line = False
-                        
-                        # 输出最后一行
-                        if line:
-                            if y < margin_bottom + 20:
-                                c.showPage()
-                                if has_chinese_font:
-                                    c.setFont('chinese', 12)
-                                y = height - margin_top
-                            
-                            x = current_x if first_line else margin_left
-                            if text_align == 'center':
-                                c.drawCentredString(width/2, y, line)
-                            elif text_align == 'right':
-                                c.drawRightString(width - margin_right, y, line)
-                            else:
-                                c.drawString(x, y, line)
-                            y -= 20
-                        
-                        y -= 10  # 段落间额外间距
-                    
-                    # 检查是否需要新页面
-                    if y < margin_bottom:
+                y = height - margins[2]  # 初始y坐标
+                for chunk in chunks:
+                    y = process_chunk(chunk, font_info, c, width, height, margins)
+                    if y < margins[3]:
                         c.showPage()
-                        if has_chinese_font:
-                            c.setFont('chinese', 12)
-                        y = height - margin_top
+                        y = height - margins[2]
+                
             except Exception as e:
                 print(f"处理文档内容时出错: {str(e)}")
                 continue
@@ -284,6 +354,9 @@ def batch_convert(input_path, output_dir=None):
         input_path: 输入路径（文件或目录）
         output_dir: 输出目录
     """
+    # 在主进程中注册字体
+    register_chinese_font()
+    
     input_path = Path(input_path)
     
     # 收集所有epub文件
@@ -297,12 +370,30 @@ def batch_convert(input_path, output_dir=None):
         print("未找到epub文件")
         return
     
-    # 批量转换
-    print(f"找到 {len(epub_files)} 个epub文件")
-    for epub_file in tqdm(epub_files, desc="转换进度"):
-        pdf_path = convert_epub_to_pdf(epub_file, output_dir)
-        if pdf_path:
-            tqdm.write(f"已转换: {epub_file.name} -> {Path(pdf_path).name}")
+    # 使用进程池并行处理文件
+    max_workers = max(1, multiprocessing.cpu_count() - 1)  # 保留一个CPU核心
+    print(f"找到 {len(epub_files)} 个epub文件，使用 {max_workers} 个进程并行处理")
+    
+    # 确保每个子进程都能访问到字体信息
+    multiprocessing.set_start_method('spawn', force=True)
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 创建带有固定output_dir参数的转换函数
+        convert_func = partial(convert_epub_to_pdf, output_dir=output_dir)
+        
+        # 使用tqdm显示总体进度
+        results = list(tqdm(
+            executor.map(convert_func, epub_files),
+            total=len(epub_files),
+            desc="转换进度"
+        ))
+        
+        # 输出转换结果
+        for epub_file, pdf_path in zip(epub_files, results):
+            if pdf_path:
+                print(f"已转换: {epub_file.name} -> {Path(pdf_path).name}")
+            else:
+                print(f"转换失败: {epub_file.name}")
 
 def select_input_path():
     """打开文件选择对话框，支持选择单个epub文件或文件夹
@@ -365,6 +456,9 @@ def select_output_folder():
     return folder_path if folder_path else None
 
 def main():
+    # 在程序启动时注册字体
+    register_chinese_font()
+    
     # 选择输入文件或文件夹
     input_path = select_input_path()
     if not input_path:
