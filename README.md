@@ -1,3 +1,73 @@
+# EPUB to PDF Converter
+
+A user-friendly tool for converting EPUB e-books to PDF format, supporting batch conversion, Chinese character display, and graphical interface operation.
+
+## Background
+
+With the popularity of e-books, EPUB format has become one of the mainstream e-book formats due to its flexibility and openness. However, in certain scenarios (such as printing, archiving, and knowledge base indexing), PDF format might be more suitable. This tool aims to provide a simple solution to help users convert EPUB format e-books to PDF format while maintaining good Chinese language support.
+
+## Features
+
+- Graphical interface operation, easy to use
+- Support batch conversion of multiple EPUB files
+- Automatic recognition of system Chinese fonts
+- Support for Windows, macOS and Linux systems
+- Automatic pagination, maintaining reading experience
+- Conversion progress display
+
+## Requirements
+
+- Python 3.6 or higher version
+- Chinese fonts installed in the system
+
+## Installation
+
+1. Clone or download this project locally
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## Usage
+
+1. Run the program:
+   ```bash
+   python epub2pdf.py
+   ```
+
+2. In the folder selection dialog that pops up:
+   - First select the folder containing EPUB files
+   - Then select the destination folder for saving PDF files
+
+3. The program will automatically start conversion and display the conversion progress
+
+## Notes
+
+- Make sure Chinese fonts are installed in the system, otherwise Chinese content may not display correctly
+- Converting large files may take some time
+- It is recommended to backup original EPUB files before conversion
+
+## Dependencies
+
+- ebooklib: EPUB file parsing
+- reportlab: PDF file generation
+- beautifulsoup4: HTML content parsing
+- tqdm: Progress bar display
+- tkinter: Graphical interface support (Python standard library)
+
+## Changelog
+
+### 2025-02-12
+- Fix: Resolved the issue of incomplete display of some Chinese characters
+- Optimization: Improved PDF document layout format for better reading experience
+- New: Support for selecting single EPUB file or entire folder for conversion
+
+### 2025-02-11
+- Launch: Launched the first version of the project
+
+---
+
 # EPUB转PDF工具
 
 一个简单易用的EPUB电子书转PDF工具，支持批量转换、中文显示和图形界面操作。
